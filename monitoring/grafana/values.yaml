@@ -1,0 +1,218 @@
+# =============================================================================
+# Grafana Helm Values - Production Configuration
+# =============================================================================
+# Install: helm install grafana grafana/grafana -f values.yaml -n monitoring
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Global Settings
+# -----------------------------------------------------------------------------
+replicas: 1
+
+image:
+  repository: grafana/grafana
+  tag: "10.2.0"
+  pullPolicy: IfNotPresent
+
+# -----------------------------------------------------------------------------
+# Service Account
+# -----------------------------------------------------------------------------
+serviceAccount:
+  create: true
+  name: grafana
+
+rbac:
+  create: true
+  pspEnabled: false
+
+# -----------------------------------------------------------------------------
+# Security Context
+# -----------------------------------------------------------------------------
+securityContext:
+  runAsUser: 472
+  runAsGroup: 472
+  fsGroup: 472
+
+# -----------------------------------------------------------------------------
+# Resources
+# -----------------------------------------------------------------------------
+resources:
+  requests:
+    memory: 256Mi
+    cpu: 100m
+  limits:
+    memory: 512Mi
+    cpu: 250m
+
+# -----------------------------------------------------------------------------
+# Persistence
+# -----------------------------------------------------------------------------
+persistence:
+  enabled: true
+  type: pvc
+  size: 5Gi
+  storageClassName: "gp2"
+  accessModes:
+    - ReadWriteOnce
+
+# -----------------------------------------------------------------------------
+# Service Configuration
+# -----------------------------------------------------------------------------
+service:
+  type: LoadBalancer
+  port: 80
+  targetPort: 3000
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled: "true"
+
+# -----------------------------------------------------------------------------
+# Ingress (Alternative to LoadBalancer)
+# -----------------------------------------------------------------------------
+ingress:
+  enabled: false
+  # annotations:
+  #   kubernetes.io/ingress.class: nginx
+  #   cert-manager.io/cluster-issuer: letsencrypt-prod
+  # hosts:
+  #   - grafana.example.com
+  # tls:
+  #   - secretName: grafana-tls
+  #     hosts:
+  #       - grafana.example.com
+
+# -----------------------------------------------------------------------------
+# Admin Credentials
+# -----------------------------------------------------------------------------
+adminUser: admin
+# adminPassword is auto-generated if not set
+# Retrieve: kubectl get secret grafana -n monitoring -o jsonpath="{.data.admin-password}" | base64 -d
+
+# -----------------------------------------------------------------------------
+# Grafana Configuration
+# -----------------------------------------------------------------------------
+grafana.ini:
+  server:
+    root_url: "%(protocol)s://%(domain)s/"
+  
+  security:
+    admin_user: admin
+    disable_gravatar: true
+  
+  users:
+    allow_sign_up: false
+    allow_org_create: false
+  
+  auth.anonymous:
+    enabled: false
+  
+  analytics:
+    reporting_enabled: false
+    check_for_updates: false
+  
+  log:
+    mode: console
+    level: info
+
+# -----------------------------------------------------------------------------
+# Data Sources
+# -----------------------------------------------------------------------------
+datasources:
+  datasources.yaml:
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        uid: prometheus
+        url: http://prometheus-server.monitoring.svc.cluster.local
+        access: proxy
+        isDefault: true
+        editable: false
+        jsonData:
+          timeInterval: "15s"
+          httpMethod: POST
+
+# -----------------------------------------------------------------------------
+# Dashboard Providers
+# -----------------------------------------------------------------------------
+dashboardProviders:
+  dashboardproviders.yaml:
+    apiVersion: 1
+    providers:
+      - name: 'default'
+        orgId: 1
+        folder: ''
+        type: file
+        disableDeletion: false
+        editable: true
+        options:
+          path: /var/lib/grafana/dashboards/default
+
+# -----------------------------------------------------------------------------
+# Pre-configured Dashboards
+# -----------------------------------------------------------------------------
+dashboards:
+  default:
+    # Kubernetes Cluster Monitoring
+    kubernetes-cluster:
+      gnetId: 7249
+      revision: 1
+      datasource: Prometheus
+    
+    # Kubernetes Pods
+    kubernetes-pods:
+      gnetId: 6417
+      revision: 1
+      datasource: Prometheus
+    
+    # Node Exporter Full
+    node-exporter:
+      gnetId: 1860
+      revision: 31
+      datasource: Prometheus
+    
+    # Kubernetes Deployment
+    kubernetes-deployment:
+      gnetId: 8588
+      revision: 1
+      datasource: Prometheus
+
+# -----------------------------------------------------------------------------
+# Sidecar for Dashboard Auto-Discovery
+# -----------------------------------------------------------------------------
+sidecar:
+  dashboards:
+    enabled: true
+    label: grafana_dashboard
+    labelValue: "1"
+    folder: /var/lib/grafana/dashboards
+    searchNamespace: ALL
+  
+  datasources:
+    enabled: true
+    label: grafana_datasource
+    labelValue: "1"
+    searchNamespace: ALL
+
+# -----------------------------------------------------------------------------
+# Plugins
+# -----------------------------------------------------------------------------
+plugins:
+  - grafana-piechart-panel
+  - grafana-clock-panel
+  - grafana-simple-json-datasource
+
+# -----------------------------------------------------------------------------
+# Environment Variables
+# -----------------------------------------------------------------------------
+env:
+  GF_INSTALL_PLUGINS: "grafana-piechart-panel,grafana-clock-panel"
+
+# -----------------------------------------------------------------------------
+# Node Selector & Tolerations
+# -----------------------------------------------------------------------------
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}

@@ -1,0 +1,52 @@
+# Git
+.git
+.gitignore
+
+# Documentation
+README.md
+ARCHITECTURE.md
+COMMANDS.md
+Document.txt
+
+# Tests
+tests/
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+venv/
+.venv/
+env/
+
+# Docker
+Dockerfile
+docker-compose*.yml
+.docker/
+
+# CI/CD
+ci/
+.github/
+Jenkinsfile
+
+# Kubernetes & GitOps
+k8s/
+gitops/
+argocd/
+
+# Scripts
+scripts/
+
+# Logs
+*.log
+
+# Environment files
+.env*
+*.env

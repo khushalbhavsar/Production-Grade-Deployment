@@ -1,0 +1,219 @@
+# =============================================================================
+# Prometheus Helm Values - Production Configuration
+# =============================================================================
+# Install: helm install prometheus prometheus-community/prometheus -f values.yaml -n monitoring
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Global Settings
+# -----------------------------------------------------------------------------
+rbac:
+  create: true
+
+serviceAccounts:
+  server:
+    create: true
+    name: prometheus-server
+
+# -----------------------------------------------------------------------------
+# Prometheus Server
+# -----------------------------------------------------------------------------
+server:
+  enabled: true
+  
+  name: server
+  
+  image:
+    repository: quay.io/prometheus/prometheus
+    tag: "v2.47.0"
+    pullPolicy: IfNotPresent
+  
+  # Resource limits
+  resources:
+    requests:
+      memory: 512Mi
+      cpu: 250m
+    limits:
+      memory: 1Gi
+      cpu: 500m
+  
+  # Persistence
+  persistentVolume:
+    enabled: true
+    size: 10Gi
+    storageClass: "gp2"  # AWS EBS
+  
+  # Retention
+  retention: "15d"
+  
+  # Service configuration
+  service:
+    type: ClusterIP
+    port: 80
+    targetPort: 9090
+  
+  # Ingress (optional)
+  ingress:
+    enabled: false
+    # annotations:
+    #   kubernetes.io/ingress.class: nginx
+    # hosts:
+    #   - prometheus.example.com
+  
+  # Scrape configuration
+  global:
+    scrape_interval: 15s
+    evaluation_interval: 15s
+
+# -----------------------------------------------------------------------------
+# Alertmanager
+# -----------------------------------------------------------------------------
+alertmanager:
+  enabled: true
+  
+  resources:
+    requests:
+      memory: 128Mi
+      cpu: 50m
+    limits:
+      memory: 256Mi
+      cpu: 100m
+  
+  persistentVolume:
+    enabled: true
+    size: 2Gi
+    storageClass: "gp2"
+  
+  service:
+    type: ClusterIP
+    port: 80
+
+# -----------------------------------------------------------------------------
+# Node Exporter
+# -----------------------------------------------------------------------------
+nodeExporter:
+  enabled: true
+  
+  resources:
+    requests:
+      memory: 64Mi
+      cpu: 50m
+    limits:
+      memory: 128Mi
+      cpu: 100m
+  
+  tolerations:
+    - effect: NoSchedule
+      operator: Exists
+
+# -----------------------------------------------------------------------------
+# Kube State Metrics
+# -----------------------------------------------------------------------------
+kubeStateMetrics:
+  enabled: true
+
+# -----------------------------------------------------------------------------
+# Pushgateway
+# -----------------------------------------------------------------------------
+pushgateway:
+  enabled: false
+
+# -----------------------------------------------------------------------------
+# Extra Scrape Configs
+# -----------------------------------------------------------------------------
+extraScrapeConfigs: |
+  # Scrape ShopEasy application
+  - job_name: 'shopeasy-app'
+    kubernetes_sd_configs:
+      - role: pod
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        regex: shopeasy
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_container_port_number]
+        regex: "5000"
+        action: keep
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+
+  # Scrape Kubernetes API Server
+  - job_name: 'kubernetes-apiservers'
+    kubernetes_sd_configs:
+      - role: endpoints
+    scheme: https
+    tls_config:
+      ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+        action: keep
+        regex: default;kubernetes;https
+
+  # Scrape Kubernetes Nodes
+  - job_name: 'kubernetes-nodes'
+    kubernetes_sd_configs:
+      - role: node
+    scheme: https
+    tls_config:
+      ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    relabel_configs:
+      - action: labelmap
+        regex: __meta_kubernetes_node_label_(.+)
+
+# -----------------------------------------------------------------------------
+# Alert Rules
+# -----------------------------------------------------------------------------
+serverFiles:
+  alerting_rules.yml:
+    groups:
+      - name: ShopEasy Application Alerts
+        rules:
+          - alert: HighErrorRate
+            expr: sum(rate(flask_http_request_total{status=~"5.."}[5m])) / sum(rate(flask_http_request_total[5m])) > 0.1
+            for: 5m
+            labels:
+              severity: critical
+            annotations:
+              summary: High error rate detected
+              description: Error rate is above 10% for the last 5 minutes
+
+          - alert: PodCrashLooping
+            expr: rate(kube_pod_container_status_restarts_total[15m]) > 0
+            for: 15m
+            labels:
+              severity: warning
+            annotations:
+              summary: Pod is crash looping
+              description: Pod {{ $labels.pod }} is restarting frequently
+
+          - alert: HighMemoryUsage
+            expr: container_memory_usage_bytes / container_spec_memory_limit_bytes > 0.9
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: High memory usage
+              description: Container memory usage is above 90%
+
+      - name: Kubernetes Alerts
+        rules:
+          - alert: NodeNotReady
+            expr: kube_node_status_condition{condition="Ready",status="true"} == 0
+            for: 5m
+            labels:
+              severity: critical
+            annotations:
+              summary: Kubernetes node not ready
+              description: Node {{ $labels.node }} is not ready
+
+          - alert: DeploymentReplicasMismatch
+            expr: kube_deployment_spec_replicas != kube_deployment_status_replicas_available
+            for: 10m
+            labels:
+              severity: warning
+            annotations:
+              summary: Deployment replicas mismatch
+              description: Deployment {{ $labels.deployment }} has replica mismatch

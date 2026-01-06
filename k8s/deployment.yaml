@@ -2,7 +2,6 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: shopeasy-app
-  namespace: default
   labels:
     app: shopeasy
     environment: production

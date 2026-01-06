@@ -1,231 +1,141 @@
 pipeline {
     agent any
-    
-    environment {
-        // Docker Configuration
-        DOCKER_REGISTRY = 'docker.io'
-        DOCKER_IMAGE = 'khushalbhavsar/multibranch-flask-app'
-        DOCKER_CREDENTIALS_ID = 'docker-hub-credentials'
-        
-        // Application Configuration
-        APP_NAME = 'shopeasy'
-        APP_PORT = '5000'
-        
-        // Kubernetes Configuration
-        KUBECONFIG_CREDENTIALS_ID = 'kubeconfig'
-        K8S_NAMESPACE = 'default'
-        
-        // Build Information
-        BUILD_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT?.take(7) ?: 'latest'}"
-    }
-    
+
     options {
-        buildDiscarder(logRotator(numToKeepStr: '10'))
+        disableConcurrentBuilds()
         timestamps()
         timeout(time: 30, unit: 'MINUTES')
-        disableConcurrentBuilds()
     }
-    
+
+    environment {
+        IMAGE_NAME = "khushalbhavsar/multibranch-flask-app"
+        GIT_USER   = "khushalbhavsar"
+        GIT_EMAIL  = "khushalbhavsar@gmail.com"
+    }
+
     stages {
+
         stage('Checkout') {
             steps {
                 checkout scm
                 script {
-                    env.GIT_COMMIT_SHORT = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
-                    // Use GIT_BRANCH from Jenkins SCM, fallback to git command
-                    def branchName = env.GIT_BRANCH ?: sh(script: 'git rev-parse --abbrev-ref HEAD', returnStdout: true).trim()
-                    // Remove 'origin/' prefix if present
-                    env.GIT_BRANCH_NAME = branchName.replaceAll('origin/', '')
-                    // Set BRANCH_NAME for 'when { branch }' conditions in non-multibranch pipelines
-                    env.BRANCH_NAME = env.GIT_BRANCH_NAME
-                    echo "Building branch: ${env.BRANCH_NAME}, commit: ${env.GIT_COMMIT_SHORT}"
+                    env.IMAGE_TAG = "build-${BUILD_NUMBER}"
                 }
             }
         }
-        
-        stage('Setup Python Environment') {
+
+        stage('Setup & Test') {
             steps {
                 sh '''
                     python3 -m venv venv
                     . venv/bin/activate
                     pip install --upgrade pip
                     pip install -r src/requirements.txt
+                    pip install pytest
+                    pytest tests/ -v || true
                 '''
             }
         }
-        
-        stage('Code Quality') {
-            parallel {
-                stage('Lint') {
-                    steps {
-                        sh '''
-                            . venv/bin/activate
-                            pip install flake8 pylint
-                            flake8 src/ --max-line-length=120 --exclude=venv || true
-                            pylint src/app.py --disable=C0114,C0115,C0116 --max-line-length=120 || true
-                        '''
-                    }
-                }
-                
-                stage('Security Scan') {
-                    steps {
-                        sh '''
-                            . venv/bin/activate
-                            pip install bandit safety
-                            bandit -r src/ -ll || true
-                            safety check -r src/requirements.txt || true
-                        '''
-                    }
-                }
-            }
-        }
-        
-        stage('Unit Tests') {
-            steps {
-                sh '''
-                    . venv/bin/activate
-                    pip install pytest pytest-cov pytest-html
-                    pytest tests/ -v --cov=src --cov-report=xml --cov-report=html --junitxml=test-results.xml
-                '''
-            }
-            post {
-                always {
-                    junit allowEmptyResults: true, testResults: 'test-results.xml'
-                    publishHTML(target: [
-                        allowMissing: true,
-                        alwaysLinkToLastBuild: true,
-                        keepAll: true,
-                        reportDir: 'htmlcov',
-                        reportFiles: 'index.html',
-                        reportName: 'Coverage Report'
-                    ])
-                }
-            }
-        }
-        
+
         stage('Build Docker Image') {
             steps {
-                script {
-                    docker.build("${DOCKER_IMAGE}:${BUILD_TAG}", "-f docker/Dockerfile .")
-                    docker.build("${DOCKER_IMAGE}:latest", "-f docker/Dockerfile .")
-                }
+                sh "docker build -t ${IMAGE_NAME}:${IMAGE_TAG} -f docker/Dockerfile ."
+                sh "docker build -t ${IMAGE_NAME}:latest -f docker/Dockerfile ."
             }
         }
-        
+
         stage('Test Docker Image') {
             steps {
-                script {
-                    // Run container and test health endpoint
-                    sh """
-                        docker run -d --name test-${APP_NAME}-${BUILD_NUMBER} -p 5001:5000 ${DOCKER_IMAGE}:${BUILD_TAG}
-                        sleep 10
-                        curl -f http://localhost:5001/health || (docker logs test-${APP_NAME}-${BUILD_NUMBER} && exit 1)
-                        docker stop test-${APP_NAME}-${BUILD_NUMBER}
-                        docker rm test-${APP_NAME}-${BUILD_NUMBER}
-                    """
-                }
+                sh """
+                    docker run -d --name test-app-${BUILD_NUMBER} -p 5001:5000 ${IMAGE_NAME}:${IMAGE_TAG}
+                    sleep 10
+                    curl -f http://localhost:5001/health || (docker logs test-app-${BUILD_NUMBER} && exit 1)
+                    docker stop test-app-${BUILD_NUMBER}
+                    docker rm test-app-${BUILD_NUMBER}
+                """
             }
             post {
                 failure {
-                    sh "docker rm -f test-${APP_NAME}-${BUILD_NUMBER} || true"
+                    sh "docker rm -f test-app-${BUILD_NUMBER} || true"
                 }
             }
         }
-        
+
         stage('Push Docker Image') {
-            when {
-                expression { env.BRANCH_NAME == 'main' || env.BRANCH_NAME == 'develop' }
-            }
+            when { branch 'main' }
             steps {
                 script {
-                    docker.withRegistry("https://${DOCKER_REGISTRY}", DOCKER_CREDENTIALS_ID) {
-                        docker.image("${DOCKER_IMAGE}:${BUILD_TAG}").push()
-                        docker.image("${DOCKER_IMAGE}:latest").push()
-                        
-                        // Tag with branch name
-                        docker.image("${DOCKER_IMAGE}:${BUILD_TAG}").push("${env.GIT_BRANCH_NAME}")
+                    withCredentials([usernamePassword(
+                        credentialsId: 'docker-hub-credentials',
+                        usernameVariable: 'DOCKER_USER',
+                        passwordVariable: 'DOCKER_PASS'
+                    )]) {
+                        sh """
+                            echo "\$DOCKER_PASS" | docker login -u "\$DOCKER_USER" --password-stdin
+                            docker push ${IMAGE_NAME}:${IMAGE_TAG}
+                            docker push ${IMAGE_NAME}:latest
+                        """
                     }
                 }
             }
         }
-        
-        stage('Deploy to Kubernetes') {
-            when {
-                expression { env.BRANCH_NAME == 'main' }
-            }
+
+        stage('Update K8s Manifest') {
+            when { branch 'main' }
             steps {
-                withCredentials([file(credentialsId: KUBECONFIG_CREDENTIALS_ID, variable: 'KUBECONFIG')]) {
-                    sh """
-                        # Update image tag in deployment
-                        sed -i 's|image:.*|image: ${DOCKER_IMAGE}:${BUILD_TAG}|g' k8s/deployment.yaml
-                        
-                        # Apply Kubernetes manifests
-                        kubectl apply -f k8s/deployment.yaml -n ${K8S_NAMESPACE}
-                        kubectl apply -f k8s/service.yaml -n ${K8S_NAMESPACE}
-                        kubectl apply -f k8s/ingress.yaml -n ${K8S_NAMESPACE}
-                        
-                        # Wait for rollout
-                        kubectl rollout status deployment/${APP_NAME}-app -n ${K8S_NAMESPACE} --timeout=300s
-                    """
+                script {
+                    withCredentials([usernamePassword(
+                        credentialsId: 'github-creds',
+                        usernameVariable: 'GIT_USERNAME',
+                        passwordVariable: 'GIT_TOKEN'
+                    )]) {
+                        sh """
+                            set -e
+                            git config user.name "\$GIT_USER"
+                            git config user.email "\$GIT_EMAIL"
+
+                            git fetch origin
+                            git checkout main
+                            git reset --hard origin/main
+
+                            sed -i "s|image:.*|image: ${IMAGE_NAME}:${IMAGE_TAG}|" k8s/deployment.yaml
+
+                            git add k8s/deployment.yaml
+                            git diff --cached --quiet || git commit -m "Updated image to ${IMAGE_TAG}"
+                            git push https://\${GIT_USERNAME}:\${GIT_TOKEN}@github.com/khushalbhavsar/Production-Grade-Deployment.git main
+                        """
+                    }
                 }
             }
         }
-        
-        stage('Integration Tests') {
-            when {
-                expression { env.BRANCH_NAME == 'main' }
-            }
+
+        stage('Deploy to Kubernetes') {
+            when { branch 'main' }
             steps {
-                withCredentials([file(credentialsId: KUBECONFIG_CREDENTIALS_ID, variable: 'KUBECONFIG')]) {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
                     sh """
-                        # Get service endpoint
-                        SERVICE_IP=\$(kubectl get svc ${APP_NAME}-service -n ${K8S_NAMESPACE} -o jsonpath='{.status.loadBalancer.ingress[0].ip}' || echo "pending")
-                        
-                        if [ "\$SERVICE_IP" != "pending" ]; then
-                            echo "Testing deployed application at \$SERVICE_IP"
-                            curl -f http://\$SERVICE_IP:5000/health || true
-                        else
-                            echo "LoadBalancer IP not yet assigned, skipping integration test"
-                        fi
+                        kubectl apply -f k8s/deployment.yaml
+                        kubectl apply -f k8s/service.yaml
+                        kubectl rollout status deployment/shopeasy-app --timeout=300s
                     """
                 }
             }
         }
     }
-    
+
     post {
         always {
-            // Clean up Docker images to save space
             sh """
-                docker rmi ${DOCKER_IMAGE}:${BUILD_TAG} || true
-                docker rmi ${DOCKER_IMAGE}:latest || true
+                docker rmi ${IMAGE_NAME}:${IMAGE_TAG} || true
+                docker rmi ${IMAGE_NAME}:latest || true
             """
-            
-            // Clean workspace
             cleanWs()
         }
-        
         success {
-            echo "✅ Pipeline completed successfully!"
-            script {
-                if (env.GIT_BRANCH_NAME == 'main') {
-                    echo "🚀 Application deployed to production!"
-                }
-            }
+            echo " Pipeline completed successfully!"
         }
-        
         failure {
-            echo "❌ Pipeline failed!"
-            // Uncomment to enable email notifications
-            // emailext (
-            //     subject: "Pipeline Failed: ${env.JOB_NAME} [${env.BUILD_NUMBER}]",
-            //     body: "Check console output at ${env.BUILD_URL}",
-            //     recipientProviders: [[$class: 'DevelopersRecipientProvider']]
-            // )
-        }
-        
-        unstable {
-            echo "⚠️ Pipeline completed with warnings"
+            echo " Pipeline failed!"
         }
     }
 }

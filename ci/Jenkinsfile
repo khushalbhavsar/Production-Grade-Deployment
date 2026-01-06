@@ -32,8 +32,13 @@ pipeline {
                 checkout scm
                 script {
                     env.GIT_COMMIT_SHORT = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
-                    env.GIT_BRANCH_NAME = sh(script: 'git rev-parse --abbrev-ref HEAD', returnStdout: true).trim()
-                    echo "Building branch: ${env.GIT_BRANCH_NAME}, commit: ${env.GIT_COMMIT_SHORT}"
+                    // Use GIT_BRANCH from Jenkins SCM, fallback to git command
+                    def branchName = env.GIT_BRANCH ?: sh(script: 'git rev-parse --abbrev-ref HEAD', returnStdout: true).trim()
+                    // Remove 'origin/' prefix if present
+                    env.GIT_BRANCH_NAME = branchName.replaceAll('origin/', '')
+                    // Set BRANCH_NAME for 'when { branch }' conditions in non-multibranch pipelines
+                    env.BRANCH_NAME = env.GIT_BRANCH_NAME
+                    echo "Building branch: ${env.BRANCH_NAME}, commit: ${env.GIT_COMMIT_SHORT}"
                 }
             }
         }
@@ -129,11 +134,7 @@ pipeline {
         
         stage('Push Docker Image') {
             when {
-                anyOf {
-                    branch 'main'
-                    branch 'master'
-                    branch 'develop'
-                }
+                expression { env.BRANCH_NAME == 'main' || env.BRANCH_NAME == 'develop' }
             }
             steps {
                 script {
@@ -150,10 +151,7 @@ pipeline {
         
         stage('Deploy to Kubernetes') {
             when {
-                anyOf {
-                    branch 'main'
-                    branch 'master'
-                }
+                expression { env.BRANCH_NAME == 'main' }
             }
             steps {
                 withCredentials([file(credentialsId: KUBECONFIG_CREDENTIALS_ID, variable: 'KUBECONFIG')]) {
@@ -175,10 +173,7 @@ pipeline {
         
         stage('Integration Tests') {
             when {
-                anyOf {
-                    branch 'main'
-                    branch 'master'
-                }
+                expression { env.BRANCH_NAME == 'main' }
             }
             steps {
                 withCredentials([file(credentialsId: KUBECONFIG_CREDENTIALS_ID, variable: 'KUBECONFIG')]) {
@@ -213,7 +208,7 @@ pipeline {
         success {
             echo "✅ Pipeline completed successfully!"
             script {
-                if (env.GIT_BRANCH_NAME == 'main' || env.GIT_BRANCH_NAME == 'master') {
+                if (env.GIT_BRANCH_NAME == 'main') {
                     echo "🚀 Application deployed to production!"
                 }
             }

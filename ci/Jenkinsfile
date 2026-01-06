@@ -11,6 +11,7 @@ pipeline {
         IMAGE_NAME = "khushalbhavsar/multibranch-flask-app"
         GIT_USER   = "khushalbhavsar"
         GIT_EMAIL  = "khushalbhavsar@gmail.com"
+        K8S_NAMESPACE = "shopeasy"
     }
 
     stages {
@@ -20,9 +21,11 @@ pipeline {
                 checkout scm
                 script {
                     env.IMAGE_TAG = "build-${BUILD_NUMBER}"
-                    // Detect branch name for non-multibranch pipelines
-                    def branchName = env.GIT_BRANCH ?: sh(script: 'git rev-parse --abbrev-ref HEAD', returnStdout: true).trim()
-                    env.BRANCH_NAME = branchName.replaceAll('origin/', '')
+                    def branchName = env.GIT_BRANCH ?: sh(
+                        script: 'git rev-parse --abbrev-ref HEAD',
+                        returnStdout: true
+                    ).trim()
+                    env.BRANCH_NAME = branchName.replace('origin/', '')
                     echo "Building branch: ${env.BRANCH_NAME}, tag: ${env.IMAGE_TAG}"
                 }
             }
@@ -30,118 +33,100 @@ pipeline {
 
         stage('Setup & Test') {
             steps {
+                echo "🔧 Setting up Python environment and running tests..."
                 sh '''
                     python3 -m venv venv
                     . venv/bin/activate
                     pip install --upgrade pip
                     pip install -r src/requirements.txt
-                    pip install pytest
-                    pytest tests/ -v || true
+                    pytest tests/ -v
                 '''
+                echo "✅ Tests passed successfully!"
             }
         }
 
         stage('Build Docker Image') {
             steps {
+                echo "🐳 Building Docker image: ${IMAGE_NAME}:${IMAGE_TAG}"
                 sh "docker build -t ${IMAGE_NAME}:${IMAGE_TAG} -f docker/Dockerfile ."
                 sh "docker build -t ${IMAGE_NAME}:latest -f docker/Dockerfile ."
+                echo "✅ Docker image built successfully!"
             }
         }
 
         stage('Test Docker Image') {
             steps {
+                echo "🧪 Testing Docker container health endpoint..."
                 sh """
-                    docker run -d --name test-app-${BUILD_NUMBER} -p 5001:5000 ${IMAGE_NAME}:${IMAGE_TAG}
+                    docker run -d --name test-app-${BUILD_NUMBER}-${BRANCH_NAME} \
+                      -p 5001:5000 ${IMAGE_NAME}:${IMAGE_TAG}
                     sleep 10
-                    curl -f http://localhost:5001/health || (docker logs test-app-${BUILD_NUMBER} && exit 1)
-                    docker stop test-app-${BUILD_NUMBER}
-                    docker rm test-app-${BUILD_NUMBER}
+                    curl -f http://localhost:5001/health
+                    docker rm -f test-app-${BUILD_NUMBER}-${BRANCH_NAME}
                 """
-            }
-            post {
-                failure {
-                    sh "docker rm -f test-app-${BUILD_NUMBER} || true"
-                }
+                echo "✅ Container health check passed!"
             }
         }
 
         stage('Push Docker Image') {
-            when {
-                expression { env.BRANCH_NAME == 'main' }
-            }
+            when { branch 'main' }
             steps {
-                script {
-                    withCredentials([usernamePassword(
-                        credentialsId: 'docker-hub-credentials',
-                        usernameVariable: 'DOCKER_USER',
-                        passwordVariable: 'DOCKER_PASS'
-                    )]) {
-                        sh """
-                            echo "\$DOCKER_PASS" | docker login -u "\$DOCKER_USER" --password-stdin
-                            docker push ${IMAGE_NAME}:${IMAGE_TAG}
-                            docker push ${IMAGE_NAME}:latest
-                        """
-                    }
+                echo "📤 Pushing Docker image to Docker Hub..."
+                withCredentials([usernamePassword(
+                    credentialsId: 'docker-hub-credentials',
+                    usernameVariable: 'DOCKER_USER',
+                    passwordVariable: 'DOCKER_PASS'
+                )]) {
+                    sh """
+                        echo "\$DOCKER_PASS" | docker login -u "\$DOCKER_USER" --password-stdin
+                        docker push ${IMAGE_NAME}:${IMAGE_TAG}
+                        docker push ${IMAGE_NAME}:latest
+                    """
                 }
+                echo "✅ Docker image pushed successfully!"
             }
         }
 
         stage('Update K8s Manifest') {
-            when {
-                expression { env.BRANCH_NAME == 'main' }
-            }
+            when { branch 'main' }
             steps {
-                script {
-                    withCredentials([usernamePassword(
-                        credentialsId: 'github-creds',
-                        usernameVariable: 'GIT_USERNAME',
-                        passwordVariable: 'GIT_TOKEN'
-                    )]) {
-                        sh """
-                            set -e
-                            git config user.name "\$GIT_USER"
-                            git config user.email "\$GIT_EMAIL"
+                echo "📝 Updating Kubernetes manifest with new image tag..."
+                withCredentials([usernamePassword(
+                    credentialsId: 'github-creds',
+                    usernameVariable: 'GIT_USERNAME',
+                    passwordVariable: 'GIT_TOKEN'
+                )]) {
+                    sh """
+                        git config user.name "${GIT_USER}"
+                        git config user.email "${GIT_EMAIL}"
 
-                            git fetch origin
-                            git checkout main
-                            git reset --hard origin/main
+                        git checkout main
+                        git reset --hard origin/main
 
-                            sed -i "s|image:.*|image: ${IMAGE_NAME}:${IMAGE_TAG}|" k8s/deployment.yaml
+                        sed -i.bak "s|image:.*|image: ${IMAGE_NAME}:${IMAGE_TAG}|" k8s/deployment.yaml
+                        rm -f k8s/deployment.yaml.bak
 
-                            git add k8s/deployment.yaml
-                            git diff --cached --quiet || git commit -m "Updated image to ${IMAGE_TAG}"
-                            git push https://\${GIT_USERNAME}:\${GIT_TOKEN}@github.com/khushalbhavsar/Production-Grade-Deployment.git main
-                        """
-                    }
+                        git add k8s/deployment.yaml
+                        git commit -m "Update image to ${IMAGE_TAG}" || true
+                        git push https://\$GIT_USERNAME:\$GIT_TOKEN@github.com/khushalbhavsar/Production-Grade-Deployment.git main
+                    """
                 }
+                echo "✅ K8s manifest updated and pushed to GitHub!"
             }
         }
 
         stage('Deploy to Kubernetes') {
-            when {
-                allOf {
-                    expression { env.BRANCH_NAME == 'main' }
-                    expression { 
-                        // Only run if kubeconfig credential exists
-                        try {
-                            withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
-                                return true
-                            }
-                        } catch (Exception e) {
-                            echo "⚠️ Skipping K8s deployment - 'kubeconfig' credential not found"
-                            return false
-                        }
-                    }
-                }
-            }
+            when { branch 'main' }
             steps {
+                echo "🚀 Deploying to Kubernetes cluster..."
                 withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
                     sh """
-                        kubectl apply -f k8s/deployment.yaml
-                        kubectl apply -f k8s/service.yaml
-                        kubectl rollout status deployment/shopeasy-app --timeout=300s
+                        kubectl create ns ${K8S_NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -
+                        kubectl apply -f k8s/ -n ${K8S_NAMESPACE}
+                        kubectl rollout status deployment/shopeasy-app -n ${K8S_NAMESPACE} --timeout=300s
                     """
                 }
+                echo "✅ Application deployed to Kubernetes successfully!"
             }
         }
     }
@@ -155,10 +140,10 @@ pipeline {
             cleanWs()
         }
         success {
-            echo " Pipeline completed successfully!"
+            echo "✅ Pipeline completed successfully!"
         }
         failure {
-            echo " Pipeline failed!"
+            echo "❌ Pipeline failed!"
         }
     }
 }

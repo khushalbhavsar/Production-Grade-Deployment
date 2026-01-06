@@ -20,6 +20,10 @@ pipeline {
                 checkout scm
                 script {
                     env.IMAGE_TAG = "build-${BUILD_NUMBER}"
+                    // Detect branch name for non-multibranch pipelines
+                    def branchName = env.GIT_BRANCH ?: sh(script: 'git rev-parse --abbrev-ref HEAD', returnStdout: true).trim()
+                    env.BRANCH_NAME = branchName.replaceAll('origin/', '')
+                    echo "Building branch: ${env.BRANCH_NAME}, tag: ${env.IMAGE_TAG}"
                 }
             }
         }
@@ -62,7 +66,9 @@ pipeline {
         }
 
         stage('Push Docker Image') {
-            when { branch 'main' }
+            when {
+                expression { env.BRANCH_NAME == 'main' }
+            }
             steps {
                 script {
                     withCredentials([usernamePassword(
@@ -81,7 +87,9 @@ pipeline {
         }
 
         stage('Update K8s Manifest') {
-            when { branch 'main' }
+            when {
+                expression { env.BRANCH_NAME == 'main' }
+            }
             steps {
                 script {
                     withCredentials([usernamePassword(
@@ -110,7 +118,9 @@ pipeline {
         }
 
         stage('Deploy to Kubernetes') {
-            when { branch 'main' }
+            when {
+                expression { env.BRANCH_NAME == 'main' }
+            }
             steps {
                 withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
                     sh """

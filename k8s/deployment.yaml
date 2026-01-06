@@ -23,7 +23,7 @@ spec:
     spec:
       containers:
       - name: shopeasy
-        image: khushalbhavsar/multibranch-flask-app:build-12
+        image: khushalbhavsar/multibranch-flask-app:build-13
         ports:
         - containerPort: 5000
         resources:

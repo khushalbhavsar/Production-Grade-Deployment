@@ -8,10 +8,9 @@ pipeline {
     }
 
     environment {
-        IMAGE_NAME    = "khushalbhavsar/multibranch-flask-app"
-        GIT_USER      = "khushalbhavsar"
-        GIT_EMAIL     = "khushalbhavsar@gmail.com"
-        K8S_NAMESPACE = "shopeasy"
+        IMAGE_NAME = "khushalbhavsar/multibranch-flask-app"
+        GIT_USER   = "khushalbhavsar"
+        GIT_EMAIL  = "khushalbhavsar@gmail.com"
     }
 
     stages {
@@ -48,7 +47,7 @@ pipeline {
 
         stage('Build Docker Image') {
             steps {
-                echo "🐳 Building Docker images"
+                echo "🐳 Building Docker image"
                 sh """
                     docker build -t ${IMAGE_NAME}:${IMAGE_TAG} -f docker/Dockerfile .
                     docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${IMAGE_NAME}:latest
@@ -58,7 +57,7 @@ pipeline {
 
         stage('Test Docker Image') {
             steps {
-                echo "🧪 Testing container health endpoint"
+                echo "🧪 Testing container health"
                 sh """
                     docker run -d --name test-app-${BUILD_NUMBER} \
                         -p 5001:5000 ${IMAGE_NAME}:${IMAGE_TAG}
@@ -91,12 +90,12 @@ pipeline {
             }
         }
 
-        stage('Update K8s Manifest (GitOps)') {
+        stage('Update Kubernetes Manifests (GitOps)') {
             when {
                 expression { env.BRANCH_NAME == 'main' }
             }
             steps {
-                echo "📝 Updating Kubernetes manifest"
+                echo "📝 Updating K8s manifest (GitOps)"
                 withCredentials([usernamePassword(
                     credentialsId: 'github-creds',
                     usernameVariable: 'GIT_USERNAME',
@@ -118,25 +117,6 @@ pipeline {
                 }
             }
         }
-
-        /*
-        🔥 OPTIONAL (NOT NEEDED IF USING ARGO CD)
-        stage('Deploy to Kubernetes') {
-            when {
-                expression { env.BRANCH_NAME == 'main' }
-            }
-            steps {
-                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
-                    sh """
-                        kubectl apply -f k8s/namespace.yaml
-                        kubectl apply -f k8s/ -n ${K8S_NAMESPACE}
-                        kubectl rollout status deployment/shopeasy-app \
-                            -n ${K8S_NAMESPACE} --timeout=300s
-                    """
-                }
-            }
-        }
-        */
     }
 
     post {
@@ -148,7 +128,7 @@ pipeline {
             cleanWs()
         }
         success {
-            echo "✅ Pipeline completed successfully!"
+            echo "✅ CI completed. Argo CD will deploy automatically."
         }
         failure {
             echo "❌ Pipeline failed!"

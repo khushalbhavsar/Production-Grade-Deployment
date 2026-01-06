@@ -119,7 +119,20 @@ pipeline {
 
         stage('Deploy to Kubernetes') {
             when {
-                expression { env.BRANCH_NAME == 'main' }
+                allOf {
+                    expression { env.BRANCH_NAME == 'main' }
+                    expression { 
+                        // Only run if kubeconfig credential exists
+                        try {
+                            withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                                return true
+                            }
+                        } catch (Exception e) {
+                            echo "⚠️ Skipping K8s deployment - 'kubeconfig' credential not found"
+                            return false
+                        }
+                    }
+                }
             }
             steps {
                 withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {

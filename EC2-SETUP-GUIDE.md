@@ -12,14 +12,15 @@ This comprehensive guide walks you through setting up an AWS EC2 instance from s
 4. [Install Docker](#4-install-docker)
 5. [Install AWS CLI](#5-install-aws-cli)
 6. [Install kubectl](#6-install-kubectl)
-7. [Install Helm](#7-install-helm)
-8. [Install Jenkins](#8-install-jenkins)
-9. [Jenkins Pipeline Configuration](#9-jenkins-pipeline-configuration)
-10. [Install Monitoring Stack](#10-install-monitoring-stack)
-11. [Grafana Dashboard Creation](#11-grafana-dashboard-creation)
-12. [Security Group Configuration](#12-security-group-configuration)
-13. [Quick Installation Scripts](#13-quick-installation-scripts)
-14. [Troubleshooting](#14-troubleshooting)
+7. [EKS Cluster Creation & Deletion](#61-eks-cluster-creation--deletion)
+8. [Install Helm](#7-install-helm)
+9. [Install Jenkins](#8-install-jenkins)
+10. [Jenkins Pipeline Configuration](#9-jenkins-pipeline-configuration)
+11. [Install Monitoring Stack](#10-install-monitoring-stack)
+12. [Grafana Dashboard Creation](#11-grafana-dashboard-creation)
+13. [Security Group Configuration](#12-security-group-configuration)
+14. [Quick Installation Scripts](#13-quick-installation-scripts)
+15. [Troubleshooting](#14-troubleshooting)
 
 ---
 
@@ -40,7 +41,7 @@ This comprehensive guide walks you through setting up an AWS EC2 instance from s
 
 2. **Name and Tags**
    ```
-   Name: ShopDeploy-DevOps-Server
+   Name: ShopEasy-DevOps-Server
    ```
 
 3. **Select AMI**
@@ -235,11 +236,315 @@ source ~/.bashrc
 #==============================================================================
 aws eks update-kubeconfig \
     --region us-east-1 \
-    --name your-cluster-name
+    --name shopeasy-dev-cluster  # Update with your cluster name
 
 # Verify cluster access
 kubectl get nodes
 kubectl cluster-info
+```
+
+---
+
+## 6.1. EKS Cluster Creation & Deletion
+
+### Prerequisites
+
+```bash
+#==============================================================================
+# Install eksctl (EKS CLI Tool)
+#==============================================================================
+# Download and install eksctl
+curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+sudo mv /tmp/eksctl /usr/local/bin
+
+# Verify installation
+eksctl version
+
+# Enable autocompletion
+echo 'source <(eksctl completion bash)' >> ~/.bashrc
+source ~/.bashrc
+```
+
+### Create EKS Cluster
+
+#### Option 1: Using eksctl (Recommended)
+
+```bash
+#==============================================================================
+# Create EKS Cluster for ShopEasy Project
+#==============================================================================
+eksctl create cluster \
+    --name shopeasy-dev-cluster \
+    --region us-east-1 \
+    --version 1.28 \
+    --nodegroup-name shopeasy-nodes \
+    --node-type t3.medium \
+    --nodes 2 \
+    --nodes-min 1 \
+    --nodes-max 4 \
+    --managed \
+    --with-oidc \
+    --ssh-access \
+    --ssh-public-key shopeasy-key \
+    --zones us-east-1a,us-east-1b
+
+# This command will take 15-20 minutes to complete
+```
+
+#### Option 2: Using eksctl with Config File
+
+```bash
+# Create cluster config file
+cat > shopeasy-cluster.yaml <<EOF
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: shopeasy-dev-cluster
+  region: us-east-1
+  version: "1.28"
+
+iam:
+  withOIDC: true
+
+managedNodeGroups:
+  - name: shopeasy-nodes
+    instanceType: t3.medium
+    desiredCapacity: 2
+    minSize: 1
+    maxSize: 4
+    volumeSize: 30
+    volumeType: gp3
+    ssh:
+      allow: true
+      publicKeyName: shopeasy-key
+    labels:
+      role: worker
+      environment: dev
+    tags:
+      Project: ShopEasy
+      Environment: Development
+    iam:
+      withAddonPolicies:
+        imageBuilder: true
+        autoScaler: true
+        cloudWatch: true
+        albIngress: true
+
+cloudWatch:
+  clusterLogging:
+    enableTypes: ["api", "audit", "authenticator", "controllerManager", "scheduler"]
+EOF
+
+# Create cluster using config file
+eksctl create cluster -f shopeasy-cluster.yaml
+```
+
+#### Option 3: Using AWS CLI
+
+```bash
+#==============================================================================
+# Create EKS Cluster using AWS CLI
+#==============================================================================
+
+# Step 1: Create IAM Role for EKS Cluster
+aws iam create-role \
+    --role-name ShopEasyEKSClusterRole \
+    --assume-role-policy-document '{
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"Service": "eks.amazonaws.com"},
+            "Action": "sts:AssumeRole"
+        }]
+    }'
+
+aws iam attach-role-policy \
+    --role-name ShopEasyEKSClusterRole \
+    --policy-arn arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+
+# Step 2: Create VPC (or use existing)
+# Get default VPC and subnets
+VPC_ID=$(aws ec2 describe-vpcs --filters "Name=isDefault,Values=true" --query 'Vpcs[0].VpcId' --output text)
+SUBNET_IDS=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" --query 'Subnets[*].SubnetId' --output text | tr '\t' ',')
+
+# Step 3: Create EKS Cluster
+aws eks create-cluster \
+    --name shopeasy-dev-cluster \
+    --region us-east-1 \
+    --kubernetes-version 1.28 \
+    --role-arn arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):role/ShopEasyEKSClusterRole \
+    --resources-vpc-config subnetIds=$SUBNET_IDS
+
+# Wait for cluster to be active (takes ~10 minutes)
+aws eks wait cluster-active --name shopeasy-dev-cluster --region us-east-1
+
+# Step 4: Create Node Group
+aws iam create-role \
+    --role-name ShopEasyEKSNodeRole \
+    --assume-role-policy-document '{
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"Service": "ec2.amazonaws.com"},
+            "Action": "sts:AssumeRole"
+        }]
+    }'
+
+aws iam attach-role-policy --role-name ShopEasyEKSNodeRole --policy-arn arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+aws iam attach-role-policy --role-name ShopEasyEKSNodeRole --policy-arn arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+aws iam attach-role-policy --role-name ShopEasyEKSNodeRole --policy-arn arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+
+aws eks create-nodegroup \
+    --cluster-name shopeasy-dev-cluster \
+    --nodegroup-name shopeasy-nodes \
+    --node-role arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):role/ShopEasyEKSNodeRole \
+    --subnets $(echo $SUBNET_IDS | tr ',' ' ') \
+    --instance-types t3.medium \
+    --scaling-config minSize=1,maxSize=4,desiredSize=2 \
+    --disk-size 30
+
+# Wait for nodegroup to be active
+aws eks wait nodegroup-active \
+    --cluster-name shopeasy-dev-cluster \
+    --nodegroup-name shopeasy-nodes \
+    --region us-east-1
+```
+
+### Verify Cluster Creation
+
+```bash
+#==============================================================================
+# Verify EKS Cluster
+#==============================================================================
+
+# Update kubeconfig
+aws eks update-kubeconfig --region us-east-1 --name shopeasy-dev-cluster
+
+# Check cluster info
+kubectl cluster-info
+
+# Check nodes
+kubectl get nodes -o wide
+
+# Check system pods
+kubectl get pods -n kube-system
+
+# Check cluster details
+eksctl get cluster --name shopeasy-dev-cluster --region us-east-1
+aws eks describe-cluster --name shopeasy-dev-cluster --region us-east-1
+```
+
+### Delete EKS Cluster
+
+#### Option 1: Using eksctl (Recommended)
+
+```bash
+#==============================================================================
+# Delete EKS Cluster using eksctl
+#==============================================================================
+
+# Delete all resources deployed on the cluster first
+kubectl delete all --all -n default
+kubectl delete all --all -n monitoring
+kubectl delete all --all -n argocd
+
+# Delete the cluster (this deletes nodegroups and all associated resources)
+eksctl delete cluster --name shopeasy-dev-cluster --region us-east-1
+
+# This will take 10-15 minutes to complete
+```
+
+#### Option 2: Using eksctl with Config File
+
+```bash
+# If you created using config file
+eksctl delete cluster -f shopeasy-cluster.yaml
+```
+
+#### Option 3: Using AWS CLI
+
+```bash
+#==============================================================================
+# Delete EKS Cluster using AWS CLI
+#==============================================================================
+
+# Step 1: Delete Node Group
+aws eks delete-nodegroup \
+    --cluster-name shopeasy-dev-cluster \
+    --nodegroup-name shopeasy-nodes \
+    --region us-east-1
+
+# Wait for nodegroup deletion
+aws eks wait nodegroup-deleted \
+    --cluster-name shopeasy-dev-cluster \
+    --nodegroup-name shopeasy-nodes \
+    --region us-east-1
+
+# Step 2: Delete Cluster
+aws eks delete-cluster \
+    --name shopeasy-dev-cluster \
+    --region us-east-1
+
+# Wait for cluster deletion
+aws eks wait cluster-deleted --name shopeasy-dev-cluster --region us-east-1
+
+# Step 3: Clean up IAM Roles (optional)
+aws iam detach-role-policy --role-name ShopEasyEKSNodeRole --policy-arn arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+aws iam detach-role-policy --role-name ShopEasyEKSNodeRole --policy-arn arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+aws iam detach-role-policy --role-name ShopEasyEKSNodeRole --policy-arn arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+aws iam delete-role --role-name ShopEasyEKSNodeRole
+
+aws iam detach-role-policy --role-name ShopEasyEKSClusterRole --policy-arn arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+aws iam delete-role --role-name ShopEasyEKSClusterRole
+
+echo "✅ EKS Cluster deleted successfully!"
+```
+
+### Quick Reference Commands
+
+```bash
+#==============================================================================
+# EKS Cluster Management Quick Reference
+#==============================================================================
+
+# List all clusters
+eksctl get cluster --region us-east-1
+aws eks list-clusters --region us-east-1
+
+# Describe cluster
+eksctl get cluster --name shopeasy-dev-cluster --region us-east-1
+aws eks describe-cluster --name shopeasy-dev-cluster --region us-east-1
+
+# List nodegroups
+eksctl get nodegroup --cluster shopeasy-dev-cluster --region us-east-1
+aws eks list-nodegroups --cluster-name shopeasy-dev-cluster --region us-east-1
+
+# Scale nodegroup
+eksctl scale nodegroup \
+    --cluster shopeasy-dev-cluster \
+    --name shopeasy-nodes \
+    --nodes 3 \
+    --nodes-min 2 \
+    --nodes-max 5 \
+    --region us-east-1
+
+# Update cluster version
+eksctl upgrade cluster --name shopeasy-dev-cluster --region us-east-1
+
+# Add new nodegroup
+eksctl create nodegroup \
+    --cluster shopeasy-dev-cluster \
+    --name shopeasy-nodes-v2 \
+    --node-type t3.large \
+    --nodes 2 \
+    --region us-east-1
+
+# Delete specific nodegroup
+eksctl delete nodegroup \
+    --cluster shopeasy-dev-cluster \
+    --name shopeasy-nodes-v2 \
+    --region us-east-1
 ```
 
 ---
@@ -405,7 +710,7 @@ pipeline {
     
     environment {
         DOCKER_REGISTRY = 'docker.io'
-        DOCKER_IMAGE = 'yourusername/shopeasy-app'
+        DOCKER_IMAGE = 'khushalbhavsar/multibranch-flask-app'  // Update with your DockerHub username
         DOCKER_CREDENTIALS_ID = 'docker-hub-credentials'
         APP_NAME = 'shopeasy'
         APP_PORT = '5000'
@@ -536,7 +841,7 @@ pipeline {
 2. **Select**: Multibranch Pipeline → OK
 3. **Branch Sources** → Add source → GitHub
 4. **Configure**:
-   - Repository URL: `https://github.com/yourusername/your-repo.git`
+   - Repository URL: `https://github.com/khushalbhavsar/Production-Grade-Deployment.git`
    - Credentials: Add GitHub credentials
    - Behaviors: Discover branches
 5. **Build Configuration**:
@@ -686,6 +991,11 @@ scrape_configs:
     metrics_path: '/prometheus'
     static_configs:
       - targets: ['localhost:8080']
+
+  - job_name: 'shopeasy'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['localhost:5000']
 EOF
 
 sudo systemctl restart prometheus
@@ -768,15 +1078,25 @@ kubectl get pods -n monitoring
 1. Go to **➕** → **Import**
 2. Enter Dashboard ID and click **Load**:
 
-| Dashboard | ID | Description |
-|-----------|-----|-------------|
-| Node Exporter Full | `1860` | Complete system metrics |
-| Docker Host & Container | `893` | Docker container metrics |
-| Prometheus Stats | `3662` | Prometheus self-monitoring |
-| Jenkins Performance | `9964` | Jenkins metrics |
+| Dashboard | ID | Description | Status |
+|-----------|-----|-------------|--------|
+| **Node Exporter Full** | `1860` | Complete Linux/system metrics (CPU, Memory, Disk, Network) | ✅ Verified - Active (Rev 42) |
+| **Prometheus 2.0 Overview** | `3662` | Prometheus self-monitoring and performance | ✅ Verified - Works with Prometheus 2.x |
+| **Jenkins Performance & Health** | `9964` | Jenkins job queues, executors, JVM metrics | ✅ Verified - Requires Prometheus Plugin |
+| **Docker & System Monitoring** | `893` | Docker host and container metrics | ⚠️ Older (Grafana 4) - Use for cAdvisor |
+
+**Recommended Additional Dashboards:**
+
+| Dashboard | ID | Description | Status |
+|-----------|-----|-------------|--------|
+| **Kubernetes Cluster** | `7249` | K8s cluster-wide metrics | ✅ For K8s deployments |
+| **Kubernetes Pods** | `6417` | Pod-level monitoring | ✅ For K8s deployments |
+| **Kubernetes Deployment** | `8588` | Deployment metrics | ✅ For K8s deployments |
 
 3. Select **Prometheus** as data source
 4. Click **Import**
+
+> **Note:** For Jenkins monitoring, install the [Prometheus Plugin](https://plugins.jenkins.io/prometheus/) in Jenkins first. Configure it at **Manage Jenkins** → **Configure System** → **Prometheus** section.
 
 ### Step 4: Create Custom Application Dashboard
 
@@ -868,7 +1188,7 @@ aws ec2 authorize-security-group-ingress \
 
 ```bash
 # Clone repository and run bootstrap
-git clone https://github.com/yourusername/Production-Grade-Deployment.git
+git clone https://github.com/khushalbhavsar/Production-Grade-Deployment.git
 cd Production-Grade-Deployment/scripts
 
 # Run complete bootstrap
@@ -1053,7 +1373,23 @@ sudo systemctl status jenkins grafana-server prometheus node_exporter
 For issues or questions:
 - Check the [Troubleshooting](#14-troubleshooting) section
 - Review logs using `journalctl -u <service-name>`
-- Open an issue in the project repository
+- Open an issue in the project repository: [Production-Grade-Deployment](https://github.com/khushalbhavsar/Production-Grade-Deployment)
+
+---
+
+## 📌 Project-Specific Information
+
+| Item | Value |
+|------|-------|
+| **Application Name** | ShopEasy (E-commerce Flask App) |
+| **Docker Image** | `khushalbhavsar/multibranch-flask-app` |
+| **Container Port** | 5000 |
+| **K8s Deployment** | `shopeasy-app` |
+| **K8s Service** | `shopeasy-service` |
+| **Namespace** | `default` |
+| **Health Endpoint** | `/health` |
+| **GitOps Tool** | Argo CD |
+| **Repository** | `https://github.com/khushalbhavsar/Production-Grade-Deployment.git` |
 
 ---
 

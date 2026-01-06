@@ -1,151 +1,15 @@
-// pipeline {
-//     agent any
-
-//     options {
-//         disableConcurrentBuilds()
-//         timestamps()
-//         timeout(time: 30, unit: 'MINUTES')
-//     }
-
-//     environment {
-//         IMAGE_NAME = "khushalbhavsar/multibranch-flask-app"
-//         GIT_USER   = "khushalbhavsar"
-//         GIT_EMAIL  = "khushalbhavsar@gmail.com"
-//     }
-
-//     stages {
-
-//         stage('Checkout') {
-//             steps {
-//                 checkout scm
-//                 script {
-//                     env.IMAGE_TAG = "build-${BUILD_NUMBER}"
-
-//                     def branchName = env.GIT_BRANCH ?: sh(
-//                         script: 'git rev-parse --abbrev-ref HEAD',
-//                         returnStdout: true
-//                     ).trim()
-
-//                     env.BRANCH_NAME = branchName.replace('origin/', '')
-//                     echo "🔖 Branch: ${env.BRANCH_NAME}, Image Tag: ${env.IMAGE_TAG}"
-//                 }
-//             }
-//         }
-
-//         stage('Setup & Test') {
-//             steps {
-//                 echo "🔧 Running unit tests"
-//                 sh '''
-//                     python3 -m venv venv
-//                     . venv/bin/activate
-//                     pip install --upgrade pip
-//                     pip install -r src/requirements.txt
-//                     pytest tests/ -v
-//                 '''
-//             }
-//         }
-
-//         stage('Build Docker Image') {
-//             steps {
-//                 echo "🐳 Building Docker image"
-//                 sh """
-//                     docker build -t ${IMAGE_NAME}:${IMAGE_TAG} -f docker/Dockerfile .
-//                     docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${IMAGE_NAME}:latest
-//                 """
-//             }
-//         }
-
-//         stage('Test Docker Image') {
-//             steps {
-//                 echo "🧪 Testing container health"
-//                 sh """
-//                     docker run -d --name test-app-${BUILD_NUMBER} \
-//                         -p 5001:5000 ${IMAGE_NAME}:${IMAGE_TAG}
-
-//                     sleep 10
-//                     curl -f http://localhost:5001/health
-
-//                     docker rm -f test-app-${BUILD_NUMBER}
-//                 """
-//             }
-//         }
-
-//         stage('Push Docker Image') {
-//             when {
-//                 expression { env.BRANCH_NAME == 'main' }
-//             }
-//             steps {
-//                 echo "📤 Pushing image to Docker Hub"
-//                 withCredentials([usernamePassword(
-//                     credentialsId: 'docker-hub-credentials',
-//                     usernameVariable: 'DOCKER_USER',
-//                     passwordVariable: 'DOCKER_PASS'
-//                 )]) {
-//                     sh """
-//                         echo "\$DOCKER_PASS" | docker login -u "\$DOCKER_USER" --password-stdin
-//                         docker push ${IMAGE_NAME}:${IMAGE_TAG}
-//                         docker push ${IMAGE_NAME}:latest
-//                     """
-//                 }
-//             }
-//         }
-
-//         stage('Update Kubernetes Manifests (GitOps)') {
-//             when {
-//                 expression { env.BRANCH_NAME == 'main' }
-//             }
-//             steps {
-//                 echo "📝 Updating K8s manifest (GitOps)"
-//                 withCredentials([usernamePassword(
-//                     credentialsId: 'github-creds',
-//                     usernameVariable: 'GIT_USERNAME',
-//                     passwordVariable: 'GIT_TOKEN'
-//                 )]) {
-//                     sh """
-//                         git config user.name "${GIT_USER}"
-//                         git config user.email "${GIT_EMAIL}"
-
-//                         git checkout main
-//                         git pull origin main
-
-//                         sed -i "s|image:.*|image: ${IMAGE_NAME}:${IMAGE_TAG}|" k8s/deployment.yaml
-
-//                         git add k8s/deployment.yaml
-//                         git commit -m "ci: update image to ${IMAGE_TAG}" || true
-//                         git push https://\$GIT_USERNAME:\$GIT_TOKEN@github.com/khushalbhavsar/Production-Grade-Deployment.git main
-//                     """
-//                 }
-//             }
-//         }
-//     }
-
-//     post {
-//         always {
-//             sh """
-//                 docker rmi ${IMAGE_NAME}:${IMAGE_TAG} || true
-//                 docker rmi ${IMAGE_NAME}:latest || true
-//             """
-//             cleanWs()
-//         }
-//         success {
-//             echo "✅ CI completed. Argo CD will deploy automatically."
-//         }
-//         failure {
-//             echo "❌ Pipeline failed!"
-//         }
-//     }
-// }
-
-
 pipeline {
     agent any
 
     options {
         disableConcurrentBuilds()
+        timestamps()
+        timeout(time: 30, unit: 'MINUTES')
     }
 
     environment {
         IMAGE_NAME = "khushalbhavsar/multibranch-flask-app"
+        IMAGE_TAG  = "build-${BUILD_NUMBER}"   // ✅ FIX
         GIT_USER   = "khushalbhavsar"
         GIT_EMAIL  = "khushalbhavsar@gmail.com"
     }
@@ -155,29 +19,32 @@ pipeline {
         stage('Checkout') {
             steps {
                 checkout scm
+                script {
+                    env.BRANCH_NAME = env.GIT_BRANCH ?
+                        env.GIT_BRANCH.replace('origin/', '') :
+                        sh(script: 'git rev-parse --abbrev-ref HEAD', returnStdout: true).trim()
+
+                    echo "🔖 Branch: ${env.BRANCH_NAME}, Tag: ${env.IMAGE_TAG}"
+                }
             }
         }
 
         stage('Build & Push Docker Image') {
             when { branch 'main' }
             steps {
-                script {
-                    env.IMAGE_TAG = "build-${BUILD_NUMBER}"
+                withCredentials([usernamePassword(
+                    credentialsId: 'docker-hub-credentials',
+                    usernameVariable: 'DOCKER_USER',
+                    passwordVariable: 'DOCKER_PASS'
+                )]) {
+                    sh """
+                    docker build -t ${IMAGE_NAME}:${IMAGE_TAG} -f docker/Dockerfile .
+                    docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${IMAGE_NAME}:latest
 
-                    withCredentials([usernamePassword(
-                        credentialsId: 'docker-hub-credentials',
-                        usernameVariable: 'DOCKER_USER',
-                        passwordVariable: 'DOCKER_PASS'
-                    )]) {
-                        sh """
-                        docker build -t ${IMAGE_NAME}:${IMAGE_TAG} -f docker/Dockerfile .
-                        docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${IMAGE_NAME}:latest
-
-                        echo "\$DOCKER_PASS" | docker login -u "\$DOCKER_USER" --password-stdin
-                        docker push ${IMAGE_NAME}:${IMAGE_TAG}
-                        docker push ${IMAGE_NAME}:latest
-                        """
-                    }
+                    echo "\$DOCKER_PASS" | docker login -u "\$DOCKER_USER" --password-stdin
+                    docker push ${IMAGE_NAME}:${IMAGE_TAG}
+                    docker push ${IMAGE_NAME}:latest
+                    """
                 }
             }
         }
@@ -185,28 +52,25 @@ pipeline {
         stage('Update K8s Manifest (GitOps)') {
             when { branch 'main' }
             steps {
-                script {
-                    withCredentials([usernamePassword(
-                        credentialsId: 'github-creds',
-                        usernameVariable: 'GIT_USERNAME',
-                        passwordVariable: 'GIT_TOKEN'
-                    )]) {
-                        sh """
-                        set -e
-                        git config user.name "${GIT_USER}"
-                        git config user.email "${GIT_EMAIL}"
+                withCredentials([usernamePassword(
+                    credentialsId: 'github-creds',
+                    usernameVariable: 'GIT_USERNAME',
+                    passwordVariable: 'GIT_TOKEN'
+                )]) {
+                    sh """
+                    git config user.name "${GIT_USER}"
+                    git config user.email "${GIT_EMAIL}"
 
-                        git fetch origin
-                        git checkout main
-                        git reset --hard origin/main
+                    git fetch origin
+                    git checkout main
+                    git reset --hard origin/main
 
-                        sed -i "s|image:.*|image: ${IMAGE_NAME}:${IMAGE_TAG}|" k8s/deployment.yaml
+                    sed -i "s|image:.*|image: ${IMAGE_NAME}:${IMAGE_TAG}|" k8s/deployment.yaml
 
-                        git add k8s/deployment.yaml
-                        git diff --cached --quiet || git commit -m "ci: update image to ${IMAGE_TAG}"
-                        git push https://\$GIT_USERNAME:\$GIT_TOKEN@github.com/khushalbhavsar/Production-Grade-Deployment.git main
-                        """
-                    }
+                    git add k8s/deployment.yaml
+                    git diff --cached --quiet || git commit -m "ci: update image to ${IMAGE_TAG}"
+                    git push https://\$GIT_USERNAME:\$GIT_TOKEN@github.com/khushalbhavsar/Production-Grade-Deployment.git main
+                    """
                 }
             }
         }
@@ -226,7 +90,7 @@ pipeline {
         }
 
         failure {
-            echo "❌ Pipeline failed."
+            echo "❌ CI failed."
         }
     }
 }

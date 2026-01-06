@@ -8,9 +8,9 @@ pipeline {
     }
 
     environment {
-        IMAGE_NAME = "khushalbhavsar/multibranch-flask-app"
-        GIT_USER   = "khushalbhavsar"
-        GIT_EMAIL  = "khushalbhavsar@gmail.com"
+        IMAGE_NAME    = "khushalbhavsar/multibranch-flask-app"
+        GIT_USER      = "khushalbhavsar"
+        GIT_EMAIL     = "khushalbhavsar@gmail.com"
         K8S_NAMESPACE = "shopeasy"
     }
 
@@ -21,19 +21,21 @@ pipeline {
                 checkout scm
                 script {
                     env.IMAGE_TAG = "build-${BUILD_NUMBER}"
+
                     def branchName = env.GIT_BRANCH ?: sh(
                         script: 'git rev-parse --abbrev-ref HEAD',
                         returnStdout: true
                     ).trim()
+
                     env.BRANCH_NAME = branchName.replace('origin/', '')
-                    echo "Building branch: ${env.BRANCH_NAME}, tag: ${env.IMAGE_TAG}"
+                    echo "🔖 Branch: ${env.BRANCH_NAME}, Image Tag: ${env.IMAGE_TAG}"
                 }
             }
         }
 
         stage('Setup & Test') {
             steps {
-                echo "🔧 Setting up Python environment and running tests..."
+                echo "🔧 Running unit tests"
                 sh '''
                     python3 -m venv venv
                     . venv/bin/activate
@@ -41,37 +43,40 @@ pipeline {
                     pip install -r src/requirements.txt
                     pytest tests/ -v
                 '''
-                echo "✅ Tests passed successfully!"
             }
         }
 
         stage('Build Docker Image') {
             steps {
-                echo "🐳 Building Docker image: ${IMAGE_NAME}:${IMAGE_TAG}"
-                sh "docker build -t ${IMAGE_NAME}:${IMAGE_TAG} -f docker/Dockerfile ."
-                sh "docker build -t ${IMAGE_NAME}:latest -f docker/Dockerfile ."
-                echo "✅ Docker image built successfully!"
+                echo "🐳 Building Docker images"
+                sh """
+                    docker build -t ${IMAGE_NAME}:${IMAGE_TAG} -f docker/Dockerfile .
+                    docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${IMAGE_NAME}:latest
+                """
             }
         }
 
         stage('Test Docker Image') {
             steps {
-                echo "🧪 Testing Docker container health endpoint..."
+                echo "🧪 Testing container health endpoint"
                 sh """
-                    docker run -d --name test-app-${BUILD_NUMBER}-${BRANCH_NAME} \
-                      -p 5001:5000 ${IMAGE_NAME}:${IMAGE_TAG}
+                    docker run -d --name test-app-${BUILD_NUMBER} \
+                        -p 5001:5000 ${IMAGE_NAME}:${IMAGE_TAG}
+
                     sleep 10
                     curl -f http://localhost:5001/health
-                    docker rm -f test-app-${BUILD_NUMBER}-${BRANCH_NAME}
+
+                    docker rm -f test-app-${BUILD_NUMBER}
                 """
-                echo "✅ Container health check passed!"
             }
         }
 
         stage('Push Docker Image') {
-            when { branch 'main' }
+            when {
+                expression { env.BRANCH_NAME == 'main' }
+            }
             steps {
-                echo "📤 Pushing Docker image to Docker Hub..."
+                echo "📤 Pushing image to Docker Hub"
                 withCredentials([usernamePassword(
                     credentialsId: 'docker-hub-credentials',
                     usernameVariable: 'DOCKER_USER',
@@ -83,14 +88,15 @@ pipeline {
                         docker push ${IMAGE_NAME}:latest
                     """
                 }
-                echo "✅ Docker image pushed successfully!"
             }
         }
 
-        stage('Update K8s Manifest') {
-            when { branch 'main' }
+        stage('Update K8s Manifest (GitOps)') {
+            when {
+                expression { env.BRANCH_NAME == 'main' }
+            }
             steps {
-                echo "📝 Updating Kubernetes manifest with new image tag..."
+                echo "📝 Updating Kubernetes manifest"
                 withCredentials([usernamePassword(
                     credentialsId: 'github-creds',
                     usernameVariable: 'GIT_USERNAME',
@@ -101,35 +107,33 @@ pipeline {
                         git config user.email "${GIT_EMAIL}"
 
                         git checkout main
-                        git reset --hard origin/main
+                        git pull origin main
 
-                        sed -i.bak "s|image:.*|image: ${IMAGE_NAME}:${IMAGE_TAG}|" k8s/deployment.yaml
-                        rm -f k8s/deployment.yaml.bak
+                        sed -i "s|image:.*|image: ${IMAGE_NAME}:${IMAGE_TAG}|" k8s/deployment.yaml
 
                         git add k8s/deployment.yaml
-                        git commit -m "Update image to ${IMAGE_TAG}" || true
+                        git commit -m "ci: update image to ${IMAGE_TAG}" || true
                         git push https://\$GIT_USERNAME:\$GIT_TOKEN@github.com/khushalbhavsar/Production-Grade-Deployment.git main
                     """
                 }
-                echo "✅ K8s manifest updated and pushed to GitHub!"
             }
         }
 
-        // Uncomment this stage after adding 'kubeconfig' credential in Jenkins:
-        // Manage Jenkins → Credentials → Add Credentials → Secret file → Upload your kubeconfig
         /*
+        🔥 OPTIONAL (NOT NEEDED IF USING ARGO CD)
         stage('Deploy to Kubernetes') {
-            when { branch 'main' }
+            when {
+                expression { env.BRANCH_NAME == 'main' }
+            }
             steps {
-                echo "🚀 Deploying to Kubernetes cluster..."
                 withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
                     sh """
                         kubectl apply -f k8s/namespace.yaml
                         kubectl apply -f k8s/ -n ${K8S_NAMESPACE}
-                        kubectl rollout status deployment/shopeasy-app -n ${K8S_NAMESPACE} --timeout=300s
+                        kubectl rollout status deployment/shopeasy-app \
+                            -n ${K8S_NAMESPACE} --timeout=300s
                     """
                 }
-                echo "✅ Application deployed to Kubernetes successfully!"
             }
         }
         */

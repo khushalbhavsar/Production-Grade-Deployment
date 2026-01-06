@@ -115,13 +115,16 @@ pipeline {
             }
         }
 
+        // Uncomment this stage after adding 'kubeconfig' credential in Jenkins:
+        // Manage Jenkins → Credentials → Add Credentials → Secret file → Upload your kubeconfig
+        /*
         stage('Deploy to Kubernetes') {
             when { branch 'main' }
             steps {
                 echo "🚀 Deploying to Kubernetes cluster..."
                 withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
                     sh """
-                        kubectl create ns ${K8S_NAMESPACE} --dry-run=client -o yaml | kubectl apply -f /k8s/namespace.yaml
+                        kubectl apply -f k8s/namespace.yaml
                         kubectl apply -f k8s/ -n ${K8S_NAMESPACE}
                         kubectl rollout status deployment/shopeasy-app -n ${K8S_NAMESPACE} --timeout=300s
                     """
@@ -129,6 +132,7 @@ pipeline {
                 echo "✅ Application deployed to Kubernetes successfully!"
             }
         }
+        */
     }
 
     post {
